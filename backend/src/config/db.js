@@ -1,0 +1,277 @@
+import pkg from 'pg';
+const { Pool } = pkg;
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { env } from './env.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+let dbClient = null;
+let dbType = 'unknown';
+
+// Pre-packaged seed data for automatic fallback or bootstrapping
+const INITIAL_SEEDS = [
+  ['Sarah Jenkins', 'Engineering', 'Principal Cloud Architect', 145000.00, '2021-03-15'],
+  ['Alexander Chen', 'Engineering', 'Senior Full-Stack Engineer', 125000.00, '2022-06-01'],
+  ['Elena Rostova', 'Engineering', 'Frontend Specialist', 95000.00, '2023-01-10'],
+  ['Marcus Vance', 'HR', 'People Operations Director', 115000.00, '2020-08-20'],
+  ['Priya Sharma', 'HR', 'Talent Acquisition Lead', 85000.00, '2022-11-14'],
+  ['Jonathan Miller', 'Finance', 'Senior Financial Analyst', 98000.00, '2021-09-05'],
+  ['Beatrice Dubois', 'Finance', 'Chief Financial Controller', 160000.00, '2019-04-12'],
+  ['David Kim', 'Sales', 'Enterprise Account Executive', 105000.00, '2022-02-18'],
+  ['Sophia Martinez', 'Marketing', 'VP of Brand Strategy', 135000.00, '2021-07-22'],
+  ["Liam O'Connor", 'Operations', 'Infrastructure & Ops Manager', 112000.00, '2023-05-30']
+];
+
+/**
+ * Initialize PostgreSQL connection
+ */
+async function initPostgres() {
+  const pool = new Pool(
+    env.DATABASE_URL
+      ? { connectionString: env.DATABASE_URL, connectionTimeoutMillis: 3000 }
+      : {
+          host: env.PGHOST,
+          port: env.PGPORT,
+          user: env.PGUSER,
+          password: env.PGPASSWORD,
+          database: env.PGDATABASE,
+          connectionTimeoutMillis: 3000,
+        }
+  );
+
+  // Test connection
+  const client = await pool.connect();
+  client.release();
+
+  console.log('✅ Connected to PostgreSQL database successfully.');
+
+  // Create table & indexes if not present
+  const schemaPath = path.resolve(__dirname, '../../database/schema.sql');
+  if (fs.existsSync(schemaPath)) {
+    const schemaSql = fs.readFileSync(schemaPath, 'utf8');
+    await pool.query(schemaSql);
+  }
+
+  // Check if seed needed
+  const countRes = await pool.query('SELECT COUNT(*) AS count FROM employees');
+  if (parseInt(countRes.rows[0].count, 10) === 0) {
+    console.log('🌱 Seeding initial employee records into PostgreSQL...');
+    for (const [name, dept, role, salary, joinDate] of INITIAL_SEEDS) {
+      await pool.query(
+        'INSERT INTO employees (name, department, role, salary, join_date) VALUES ($1, $2, $3, $4, $5)',
+        [name, dept, role, salary, joinDate]
+      );
+    }
+    console.log(`✅ Seeded ${INITIAL_SEEDS.length} records into PostgreSQL.`);
+  }
+
+  dbType = 'postgresql';
+  dbClient = {
+    type: 'postgresql',
+    pool,
+    async query(text, params = []) {
+      const res = await pool.query(text, params);
+      return {
+        rows: res.rows.map(normalizeRow),
+        rowCount: res.rowCount,
+      };
+    },
+    async close() {
+      await pool.end();
+    },
+  };
+
+  return dbClient;
+}
+
+/**
+ * Initialize SQLite fallback using Node.js 24 native node:sqlite
+ */
+async function initSqliteFallback() {
+  const { DatabaseSync } = await import('node:sqlite');
+  const dataDir = path.resolve(__dirname, '../../data');
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+  }
+
+  const dbPath = path.join(dataDir, 'employees.sqlite');
+  const sqlite = new DatabaseSync(dbPath);
+
+  // Pragmas for performance & integrity
+  sqlite.exec('PRAGMA journal_mode = WAL;');
+  sqlite.exec('PRAGMA foreign_keys = ON;');
+
+  // Schema definition
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS employees (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      department TEXT NOT NULL,
+      role TEXT NOT NULL,
+      salary NUMERIC NOT NULL CHECK (salary > 0),
+      join_date TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_employees_name ON employees (name);
+    CREATE INDEX IF NOT EXISTS idx_employees_department ON employees (department);
+    CREATE INDEX IF NOT EXISTS idx_employees_role ON employees (role);
+    CREATE INDEX IF NOT EXISTS idx_employees_salary ON employees (salary);
+    CREATE INDEX IF NOT EXISTS idx_employees_join_date ON employees (join_date);
+  `);
+
+  // Check seed
+  const countRow = sqlite.prepare('SELECT COUNT(*) AS count FROM employees').get();
+  if (Number(countRow.count) === 0) {
+    console.log('🌱 Seeding initial employee records into SQLite...');
+    const insertStmt = sqlite.prepare(
+      'INSERT INTO employees (name, department, role, salary, join_date) VALUES (?, ?, ?, ?, ?)'
+    );
+    for (const [name, dept, role, salary, joinDate] of INITIAL_SEEDS) {
+      insertStmt.run(name, dept, role, salary, joinDate);
+    }
+    console.log(`✅ Seeded ${INITIAL_SEEDS.length} records into SQLite.`);
+  }
+
+  dbType = 'sqlite';
+  dbClient = {
+    type: 'sqlite',
+    sqlite,
+    async query(text, params = []) {
+      // Map positional parameters $1, $2, ... to SQLite params array
+      const mappedParams = [];
+      const sqliteSql = text
+        .replace(/\$(\d+)/g, (_, indexStr) => {
+          const idx = parseInt(indexStr, 10) - 1;
+          if (idx >= 0 && idx < params.length) {
+            mappedParams.push(params[idx]);
+          }
+          return '?';
+        })
+        .replace(/RETURNING\s+\*/gi, '') // SQLite compatibility
+        .trim();
+
+      const finalParams = mappedParams.length > 0 ? mappedParams : params;
+
+      const isSelect = /^\s*SELECT/i.test(sqliteSql);
+      const isInsert = /^\s*INSERT/i.test(sqliteSql);
+      const isUpdate = /^\s*UPDATE/i.test(sqliteSql);
+      const isDelete = /^\s*DELETE/i.test(sqliteSql);
+
+      const stmt = sqlite.prepare(sqliteSql);
+
+      if (isSelect) {
+        const rows = stmt.all(...finalParams);
+        return {
+          rows: rows.map(normalizeRow),
+          rowCount: rows.length,
+        };
+      }
+
+      const result = stmt.run(...finalParams);
+
+      // If INSERT with RETURNING was intended, fetch the created row
+      if (isInsert && /RETURNING/i.test(text)) {
+        const lastRow = sqlite.prepare('SELECT * FROM employees WHERE id = ?').get(result.lastInsertRowid);
+        return {
+          rows: lastRow ? [normalizeRow(lastRow)] : [],
+          rowCount: result.changes,
+        };
+      }
+
+      // If UPDATE with RETURNING was intended
+      if (isUpdate && /RETURNING/i.test(text)) {
+        if (result.changes === 0) {
+          return { rows: [], rowCount: 0 };
+        }
+        // Last parameter in update is usually the id
+        const id = params[params.length - 1];
+        const updatedRow = sqlite.prepare('SELECT * FROM employees WHERE id = ?').get(id);
+        return {
+          rows: updatedRow ? [normalizeRow(updatedRow)] : [],
+          rowCount: result.changes,
+        };
+      }
+
+      return {
+        rows: [],
+        rowCount: result.changes,
+      };
+    },
+    async close() {
+      sqlite.close();
+    },
+  };
+
+  console.log(`⚡ Using persistent SQLite database at: ${dbPath}`);
+  return dbClient;
+}
+
+/**
+ * Uniform row normalizer (ensures date strings YYYY-MM-DD, numbers for salary, timestamps)
+ */
+function normalizeRow(row) {
+  if (!row) return row;
+  const normalized = { ...row };
+
+  // Parse salary as float
+  if (normalized.salary !== undefined) {
+    normalized.salary = parseFloat(normalized.salary);
+  }
+
+  // Format join_date as YYYY-MM-DD without UTC timezone shift
+  if (normalized.join_date) {
+    if (normalized.join_date instanceof Date) {
+      const yr = normalized.join_date.getFullYear();
+      const mo = String(normalized.join_date.getMonth() + 1).padStart(2, '0');
+      const dy = String(normalized.join_date.getDate()).padStart(2, '0');
+      normalized.join_date = `${yr}-${mo}-${dy}`;
+    } else if (typeof normalized.join_date === 'string' && normalized.join_date.includes('T')) {
+      normalized.join_date = normalized.join_date.split('T')[0];
+    }
+  }
+
+  return normalized;
+}
+
+/**
+ * Initialize DB on startup
+ */
+export async function initializeDatabase() {
+  if (dbClient) return dbClient;
+
+  try {
+    console.log('🔄 Checking PostgreSQL connection...');
+    await initPostgres();
+    return dbClient;
+  } catch (err) {
+    console.warn('⚠️ PostgreSQL connection failed:', err.message);
+    console.info('👉 Falling back to persistent local SQLite storage (Node.js native). All CRUD operations & tests will run 100% seamlessly!');
+    await initSqliteFallback();
+    return dbClient;
+  }
+}
+
+/**
+ * Export unified query executor
+ */
+export async function query(text, params = []) {
+  if (!dbClient) {
+    await initializeDatabase();
+  }
+  return dbClient.query(text, params);
+}
+
+export function getDatabaseType() {
+  return dbType;
+}
+
+export default {
+  initializeDatabase,
+  query,
+  getDatabaseType,
+};

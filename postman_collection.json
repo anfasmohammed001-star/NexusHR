@@ -1,0 +1,573 @@
+{
+  "info": {
+    "_postman_id": "b78b9c1d-8f24-4f9e-a892-d345e6789abc",
+    "name": "Employee Management System CRUD API",
+    "description": "Production-ready Postman Collection v2.1 for Employee Management System API. Compatible with Postman and Thunder Client. Supports environment variables, query parameters, request bodies, and automated test assertions.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:5000",
+      "type": "string"
+    },
+    {
+      "key": "employeeId",
+      "value": "1",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Health & Server Diagnostics",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            },
+            "description": "Verify server health and active database engine."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('Health status is healthy', function () {",
+                  "    const jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.status).to.eql('healthy');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Summary Statistics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/employees/stats/summary",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "employees", "stats", "summary"]
+            },
+            "description": "Retrieve aggregate metrics: total employees, average salary, total payroll, and department counts."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('Returns valid stats object', function () {",
+                  "    const jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.success).to.be.true;",
+                  "    pm.expect(jsonData.data).to.have.property('totalEmployees');",
+                  "    pm.expect(jsonData.data).to.have.property('averageSalary');",
+                  "    pm.expect(jsonData.data).to.have.property('totalPayroll');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Read Operations (GET)",
+      "item": [
+        {
+          "name": "GET All Employees (Default)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/employees",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "employees"]
+            },
+            "description": "Retrieve all employees without query parameters."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('Response contains success true and employee array', function () {",
+                  "    const jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.success).to.be.true;",
+                  "    pm.expect(Array.isArray(jsonData.data)).to.be.true;",
+                  "    if (jsonData.data.length > 0) {",
+                  "        pm.collectionVariables.set('employeeId', jsonData.data[0].id.toString());",
+                  "    }",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET All Employees (Search Query)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/employees?search=Engineering",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "employees"],
+              "query": [
+                {
+                  "key": "search",
+                  "value": "Engineering",
+                  "description": "Case-insensitive search across name, department, role"
+                }
+              ]
+            },
+            "description": "Search employees by department, name, or role."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('Every record matches search filter', function () {",
+                  "    const jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.success).to.be.true;",
+                  "    jsonData.data.forEach(emp => {",
+                  "        const combined = `${emp.name} ${emp.department} ${emp.role}`.toLowerCase();",
+                  "        pm.expect(combined).to.include('engineering');",
+                  "    });",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET All Employees (Sort By Salary DESC)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/employees?sortBy=salary&order=desc",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "employees"],
+              "query": [
+                {
+                  "key": "sortBy",
+                  "value": "salary",
+                  "description": "Sort column (name|department|role|salary|join_date)"
+                },
+                {
+                  "key": "order",
+                  "value": "desc",
+                  "description": "Sort direction (asc|desc)"
+                }
+              ]
+            },
+            "description": "Sort employees in descending order of salary."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('Employees sorted in descending salary order', function () {",
+                  "    const jsonData = pm.response.json();",
+                  "    for (let i = 0; i < jsonData.data.length - 1; i++) {",
+                  "        pm.expect(jsonData.data[i].salary).to.be.at.least(jsonData.data[i + 1].salary);",
+                  "    }",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Single Employee By ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/employees/{{employeeId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "employees", "{{employeeId}}"]
+            },
+            "description": "Retrieve details of a single employee by primary key."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('Returned employee matches ID', function () {",
+                  "    const jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.success).to.be.true;",
+                  "    pm.expect(jsonData.data.id.toString()).to.eql(pm.collectionVariables.get('employeeId'));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Employee By ID - 404 Not Found",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/employees/999999",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "employees", "999999"]
+            },
+            "description": "Expect 404 Not Found for non-existent employee ID."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 404 Not Found', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});",
+                  "pm.test('Response contains success false and error message', function () {",
+                  "    const jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.success).to.be.false;",
+                  "    pm.expect(jsonData.data).to.be.null;",
+                  "    pm.expect(jsonData.errors.length).to.be.above(0);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Create Operations (POST)",
+      "item": [
+        {
+          "name": "POST Create Employee (Valid)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Maya Lin\",\n  \"department\": \"Engineering\",\n  \"role\": \"Lead AI Engineer\",\n  \"salary\": 142000.00,\n  \"join_date\": \"2024-04-15\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/employees",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "employees"]
+            },
+            "description": "Create a new employee with valid payload."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 201 Created', function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "pm.test('Created employee contains generated ID and correct fields', function () {",
+                  "    const jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.success).to.be.true;",
+                  "    pm.expect(jsonData.data).to.have.property('id');",
+                  "    pm.expect(jsonData.data.name).to.eql('Maya Lin');",
+                  "    pm.expect(jsonData.data.salary).to.eql(142000);",
+                  "    pm.collectionVariables.set('createdEmployeeId', jsonData.data.id.toString());",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Create Employee - 400 Validation Error",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"   \",\n  \"department\": \"\",\n  \"role\": \"\",\n  \"salary\": -4500,\n  \"join_date\": \"invalid-date-format\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/employees",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "employees"]
+            },
+            "description": "Verify comprehensive input validation: whitespace name, negative salary, and invalid date."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 400 Bad Request', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test('Structured validation errors array returned', function () {",
+                  "    const jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.success).to.be.false;",
+                  "    pm.expect(Array.isArray(jsonData.errors)).to.be.true;",
+                  "    pm.expect(jsonData.errors.length).to.be.at.least(4);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4. Update Operations (PUT)",
+      "item": [
+        {
+          "name": "PUT Update Employee (Valid)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Maya Lin-Cooper\",\n  \"department\": \"Engineering\",\n  \"role\": \"VP of AI & Research\",\n  \"salary\": 165000.00,\n  \"join_date\": \"2024-04-15\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/employees/{{createdEmployeeId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "employees", "{{createdEmployeeId}}"]
+            },
+            "description": "Update existing employee details by ID."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('Employee record fields updated', function () {",
+                  "    const jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.success).to.be.true;",
+                  "    pm.expect(jsonData.data.name).to.eql('Maya Lin-Cooper');",
+                  "    pm.expect(jsonData.data.role).to.eql('VP of AI & Research');",
+                  "    pm.expect(jsonData.data.salary).to.eql(165000);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "PUT Update Employee - 400 Validation Error",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"\",\n  \"department\": \"Engineering\",\n  \"role\": \"   \",\n  \"salary\": 0,\n  \"join_date\": \"2024-02-30\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/employees/{{createdEmployeeId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "employees", "{{createdEmployeeId}}"]
+            },
+            "description": "Expect 400 Bad Request when updating with empty name/role, zero salary, or invalid calendar date."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 400 Bad Request', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test('Structured validation errors array returned', function () {",
+                  "    const jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.success).to.be.false;",
+                  "    pm.expect(Array.isArray(jsonData.errors)).to.be.true;",
+                  "    pm.expect(jsonData.errors.length).to.be.at.least(4);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "PUT Update Employee - 404 Not Found",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Ghost User\",\n  \"department\": \"Engineering\",\n  \"role\": \"Ghost\",\n  \"salary\": 80000,\n  \"join_date\": \"2024-01-01\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/employees/999999",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "employees", "999999"]
+            },
+            "description": "Expect 404 when attempting to update a non-existent ID."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 404 Not Found', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});",
+                  "pm.test('Response indicates failure', function () {",
+                  "    const jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.success).to.be.false;",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5. Delete Operations (DELETE)",
+      "item": [
+        {
+          "name": "DELETE Employee (Valid)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/employees/{{createdEmployeeId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "employees", "{{createdEmployeeId}}"]
+            },
+            "description": "Delete employee record by primary key ID."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('Record deleted successfully', function () {",
+                  "    const jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.success).to.be.true;",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE Employee - 404 Not Found",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/employees/{{createdEmployeeId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "employees", "{{createdEmployeeId}}"]
+            },
+            "description": "Verify 404 when deleting an already deleted employee ID."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code is 404 Not Found', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});",
+                  "pm.test('Response indicates record does not exist', function () {",
+                  "    const jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.success).to.be.false;",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+
