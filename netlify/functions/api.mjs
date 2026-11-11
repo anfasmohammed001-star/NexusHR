@@ -1,5 +1,6 @@
 import serverless from 'serverless-http';
-import app, { ensureInitialized } from '../../backend/src/server.js';
+import { connectLambda } from '@netlify/blobs';
+import app, { ensureInitialized, syncDatabase } from '../../backend/src/server.js';
 
 const FUNCTION_BASE_PATH = '/.netlify/functions/api';
 
@@ -18,6 +19,10 @@ const serverlessHandler = serverless(app, {
 });
 
 export async function handler(event, context) {
+  if (event && event.blobs) {
+    connectLambda(event);
+  }
   await ensureInitialized();
+  await syncDatabase();
   return serverlessHandler(event, context);
 }

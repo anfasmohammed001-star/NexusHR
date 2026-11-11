@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { env } from './config/env.js';
-import { initializeDatabase, getDatabaseType } from './config/db.js';
+import { initializeDatabase, syncDatabase, getDatabaseType } from './config/db.js';
 import employeeRoutes from './routes/employeeRoutes.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 
@@ -22,15 +22,25 @@ export function ensureInitialized() {
   return initPromise;
 }
 
+export { syncDatabase };
+
 // Middleware
 app.use(cors({
   origin: '*', // Allow frontend development server & tools
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control'],
 }));
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Disable HTTP/CDN response caching on dynamic API endpoints
+app.use((req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
 
 // Ensure database readiness on serverless cold starts
 app.use(async (req, res, next) => {

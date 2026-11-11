@@ -249,18 +249,35 @@ async function createNativeSqliteClient(dbPath) {
 }
 
 /**
- * Pure-JS SQLite fallback adapter (sql.js inline WASM) when node:sqlite is unavailable.
+ * Load Netlify Blobs store when running inside Netlify serverless environment.
+ */
+async function loadNetlifyBlobStore() {
+  if (!process.env.NETLIFY && !process.env.AWS_LAMBDA_FUNCTION_NAME && !globalThis.netlifyBlobsContext) {
+    return null;
+  }
+  try {
+    const { getStore } = await import('@netlify/blobs');
+    return getStore({ name: 'nexushr-db', consistency: 'strong' });
+  } catch (err) {
+    console.warn('⚠️ Netlify Blobs client unavailable, using local /tmp SQLite:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Pure-JS SQLite adapter (sql.js inline WASM) with strongly consistent Netlify Blobs sync.
  */
 async function createSqlJsClient(dbPath) {
+  const BLOB_KEY = 'employees.sqlite';
   const sqlJsMod = await import('sql.js/dist/sql-wasm-inline.js');
   const initSqlJs = sqlJsMod.default || sqlJsMod;
   const SQL = await initSqlJs();
-  const initialBuffer = fs.existsSync(dbPath) ? fs.readFileSync(dbPath) : undefined;
-  const sqlDb = new SQL.Database(initialBuffer);
+  const blobStore = await loadNetlifyBlobStore();
 
-  const persist = () => {
-    fs.writeFileSync(dbPath, Buffer.from(sqlDb.export()));
-  };
+  let sqlDb = null;
+  let currentBlobEtag = null;
+  let blobSyncDisabled = !blobStore;
+  let syncQueue = Promise.resolve();
 
   const runSelect = (sql, bindParams = []) => {
     const stmt = sqlDb.prepare(sql);
@@ -275,22 +292,109 @@ async function createSqlJsClient(dbPath) {
     return rows;
   };
 
-  sqlDb.exec(SQLITE_SCHEMA_SQL);
-  const countRow = runSelect('SELECT COUNT(*) AS count FROM employees')[0];
-  if (Number(countRow?.count || 0) === 0) {
-    console.log('🌱 Seeding initial employee records into sql.js SQLite...');
-    for (const [name, dept, role, salary, joinDate] of INITIAL_SEEDS) {
-      sqlDb.run(
-        'INSERT INTO employees (name, department, role, salary, join_date) VALUES (?, ?, ?, ?, ?)',
-        [name, dept, role, salary, joinDate]
-      );
+  const ensureSchemaAndSeed = () => {
+    sqlDb.exec(SQLITE_SCHEMA_SQL);
+    const countRow = runSelect('SELECT COUNT(*) AS count FROM employees')[0];
+    if (Number(countRow?.count || 0) === 0) {
+      console.log('🌱 Seeding initial employee records into sql.js SQLite...');
+      for (const [name, dept, role, salary, joinDate] of INITIAL_SEEDS) {
+        sqlDb.run(
+          'INSERT INTO employees (name, department, role, salary, join_date) VALUES (?, ?, ?, ?, ?)',
+          [name, dept, role, salary, joinDate]
+        );
+      }
+      console.log(`✅ Seeded ${INITIAL_SEEDS.length} records into sql.js SQLite.`);
+      return true;
     }
-    console.log(`✅ Seeded ${INITIAL_SEEDS.length} records into sql.js SQLite.`);
-  }
-  persist();
+    return false;
+  };
+
+  const loadSqlDbFromBuffer = (bufferLike) => {
+    if (sqlDb) {
+      sqlDb.close();
+    }
+    sqlDb = new SQL.Database(bufferLike ? new Uint8Array(bufferLike) : undefined);
+    return ensureSchemaAndSeed();
+  };
+
+  const exportAndWriteLocal = () => {
+    const bytes = sqlDb.export();
+    fs.writeFileSync(dbPath, Buffer.from(bytes));
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  };
+
+  const isMissingBlobsEnvError = (err) =>
+    /MissingBlobsEnvironment/i.test(`${err?.name || ''} ${err?.message || ''}`);
+
+  const persist = async () => {
+    const arrayBuffer = exportAndWriteLocal();
+    if (blobSyncDisabled || !blobStore) return;
+
+    try {
+      await blobStore.set(BLOB_KEY, arrayBuffer);
+      const meta = await blobStore.getMetadata(BLOB_KEY, { consistency: 'strong' });
+      currentBlobEtag = meta?.etag || null;
+    } catch (err) {
+      if (isMissingBlobsEnvError(err)) {
+        blobSyncDisabled = true;
+        return;
+      }
+      console.warn('⚠️ Failed to persist SQLite state to Netlify Blobs:', err.message);
+    }
+  };
+
+  const performSync = async () => {
+    if (!sqlDb) {
+      const localBytes = fs.existsSync(dbPath) ? fs.readFileSync(dbPath) : undefined;
+      loadSqlDbFromBuffer(localBytes);
+    }
+
+    if (blobSyncDisabled || !blobStore) {
+      exportAndWriteLocal();
+      return;
+    }
+
+    try {
+      const meta = await blobStore.getMetadata(BLOB_KEY, { consistency: 'strong' });
+      if (!meta) {
+        await persist();
+        return;
+      }
+
+      if (meta.etag && meta.etag === currentBlobEtag) {
+        return;
+      }
+
+      const entry = await blobStore.getWithMetadata(BLOB_KEY, {
+        type: 'arrayBuffer',
+        consistency: 'strong',
+      });
+      if (entry?.data) {
+        loadSqlDbFromBuffer(entry.data);
+        exportAndWriteLocal();
+        currentBlobEtag = entry.etag || meta.etag || null;
+      }
+    } catch (err) {
+      if (isMissingBlobsEnvError(err)) {
+        blobSyncDisabled = true;
+        exportAndWriteLocal();
+        return;
+      }
+      console.warn('⚠️ Failed to sync SQLite state from Netlify Blobs:', err.message);
+    }
+  };
+
+  const sync = () => {
+    const run = syncQueue.then(performSync, performSync);
+    syncQueue = run.catch(() => {});
+    return run;
+  };
+
+  await sync();
 
   return {
     type: 'sqlite',
+    sync,
     async query(text, params = []) {
       const { sqliteSql, finalParams, isSelect, isInsert, isUpdate, wantsReturning } =
         translatePostgresParams(text, params);
@@ -312,30 +416,39 @@ async function createSqlJsClient(dbPath) {
         rows = runSelect('SELECT * FROM employees WHERE id = ?', [id]).map(normalizeRow);
       }
 
-      persist();
+      await persist();
       return { rows, rowCount: changes };
     },
     async close() {
-      persist();
-      sqlDb.close();
+      await persist();
+      if (sqlDb) {
+        sqlDb.close();
+        sqlDb = null;
+      }
     },
   };
 }
 
 /**
- * Initialize SQLite fallback (node:sqlite on Node 22.13+/24+, or pure-JS sql.js fallback)
+ * Initialize SQLite fallback (node:sqlite locally; sql.js + Blobs on serverless)
  */
 async function initSqliteFallback() {
   const dbPath = resolveSqlitePath();
+  const useSqlJsPrimary = Boolean(
+    process.env.FORCE_SQLJS === '1' ||
+      process.env.NETLIFY ||
+      process.env.AWS_LAMBDA_FUNCTION_NAME
+  );
 
-  try {
-    if (process.env.FORCE_SQLJS === '1') {
-      throw new Error('Forced sql.js fallback mode');
-    }
-    dbClient = await createNativeSqliteClient(dbPath);
-  } catch (nativeErr) {
-    console.warn('⚠️ Native node:sqlite unavailable, using sql.js fallback:', nativeErr.message);
+  if (useSqlJsPrimary) {
     dbClient = await createSqlJsClient(dbPath);
+  } else {
+    try {
+      dbClient = await createNativeSqliteClient(dbPath);
+    } catch (nativeErr) {
+      console.warn('⚠️ Native node:sqlite unavailable, using sql.js fallback:', nativeErr.message);
+      dbClient = await createSqlJsClient(dbPath);
+    }
   }
 
   dbType = 'sqlite';
@@ -389,6 +502,18 @@ export async function initializeDatabase() {
 }
 
 /**
+ * Synchronize database state across serverless invocations when supported.
+ */
+export async function syncDatabase() {
+  if (!dbClient) {
+    await initializeDatabase();
+  }
+  if (typeof dbClient?.sync === 'function') {
+    await dbClient.sync();
+  }
+}
+
+/**
  * Export unified query executor
  */
 export async function query(text, params = []) {
@@ -404,6 +529,7 @@ export function getDatabaseType() {
 
 export default {
   initializeDatabase,
+  syncDatabase,
   query,
   getDatabaseType,
 };

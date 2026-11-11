@@ -186,17 +186,43 @@ export default function App() {
   const handleFormSubmit = async (payload) => {
     setFormSubmitting(true);
     try {
+      let savedRecord;
       if (editingEmployee && editingEmployee.id) {
         const updated = await apiService.updateEmployee(editingEmployee.id, payload);
-        showToast(`Employee "${updated.data.name}" updated successfully!`, 'success');
-
-        setEmployees((prev) =>
-          prev.map((emp) => (emp.id === editingEmployee.id ? updated.data : emp))
-        );
+        savedRecord = updated.data;
+        showToast(`Employee "${savedRecord.name}" updated successfully!`, 'success');
       } else {
         const created = await apiService.createEmployee(payload);
-        showToast(`Employee "${created.data.name}" added to directory!`, 'success');
-        await fetchEmployees();
+        savedRecord = created.data;
+        showToast(`Employee "${savedRecord.name}" added to directory!`, 'success');
+      }
+
+      const trimmedSearch = debouncedSearchTerm.trim().toLowerCase();
+      const searchStillMatches =
+        !trimmedSearch ||
+        [savedRecord.name, savedRecord.department, savedRecord.role].some((val) =>
+          String(val || '').toLowerCase().includes(trimmedSearch)
+        );
+
+      if (!searchStillMatches) {
+        setSearchTerm('');
+        setDebouncedSearchTerm('');
+      }
+
+      if (
+        departmentFilter !== 'All' &&
+        savedRecord.department?.toLowerCase() !== departmentFilter.toLowerCase()
+      ) {
+        setDepartmentFilter('All');
+      }
+
+      const freshList = await apiService.getEmployees({
+        search: searchStillMatches ? debouncedSearchTerm : '',
+        sortBy,
+        order: sortOrder,
+      });
+      if (freshList && freshList.data) {
+        setEmployees(freshList.data);
       }
 
       await fetchStats();

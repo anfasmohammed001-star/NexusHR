@@ -346,6 +346,6 @@ This repository includes [netlify.toml](netlify.toml) and [netlify/functions/api
 - **Build command**: `npm run netlify:build`
 - **Publish directory**: `frontend/dist`
 - **Functions directory**: `netlify/functions` (proxies `/api/*` and `/health` via `[[redirects]]`, plus `/* -> /index.html` SPA rewrite)
-- **Database persistence**: Without external config, Netlify Functions seed an ephemeral `/tmp` SQLite database (`sql.js` / `node:sqlite`). For permanent cloud persistence across cold starts, add `DATABASE_URL` in **Netlify Site Configuration -> Environment variables** pointing to PostgreSQL (e.g. Supabase or Neon).
+- **Database persistence**: When `DATABASE_URL` is configured (PostgreSQL such as Supabase or Neon), Netlify Functions persist directly to PostgreSQL with automatic TLS/SSL. When `DATABASE_URL` is omitted, the API automatically persists SQLite state in **Netlify Blobs (`strong` consistency)** so creates, edits, and deletes stay synchronized across serverless containers and page reloads.
 
 
