@@ -249,17 +249,27 @@ async function createNativeSqliteClient(dbPath) {
 }
 
 /**
- * Load Netlify Blobs store when running inside Netlify serverless environment.
+ * Check whether the runtime provides Netlify / serverless Blobs configuration and return a store.
  */
-async function loadNetlifyBlobStore() {
-  if (!process.env.NETLIFY && !process.env.AWS_LAMBDA_FUNCTION_NAME && !globalThis.netlifyBlobsContext) {
+async function resolveNetlifyBlobStore() {
+  const hasServerlessEnv = Boolean(
+    globalThis.Netlify?.env?.has?.('NETLIFY_BLOBS_CONTEXT') ||
+      globalThis.netlifyBlobsContext ||
+      process.env.NETLIFY_BLOBS_CONTEXT ||
+      process.env.NETLIFY ||
+      process.env.AWS_LAMBDA_FUNCTION_NAME
+  );
+  if (!hasServerlessEnv) {
     return null;
   }
+
   try {
     const { getStore } = await import('@netlify/blobs');
     return getStore({ name: 'nexushr-db', consistency: 'strong' });
   } catch (err) {
-    console.warn('⚠️ Netlify Blobs client unavailable, using local /tmp SQLite:', err.message);
+    if (!/MissingBlobsEnvironment/i.test(`${err?.name || ''} ${err?.message || ''}`)) {
+      console.warn('⚠️ Netlify Blobs client unavailable, using local SQLite:', err.message);
+    }
     return null;
   }
 }
@@ -272,12 +282,17 @@ async function createSqlJsClient(dbPath) {
   const sqlJsMod = await import('sql.js/dist/sql-wasm-inline.js');
   const initSqlJs = sqlJsMod.default || sqlJsMod;
   const SQL = await initSqlJs();
-  const blobStore = await loadNetlifyBlobStore();
 
   let sqlDb = null;
   let currentBlobEtag = null;
-  let blobSyncDisabled = !blobStore;
-  let syncQueue = Promise.resolve();
+  let blobStatus = 'sqlite-local';
+  let opQueue = Promise.resolve();
+
+  const enqueue = (fn) => {
+    const run = opQueue.then(fn, fn);
+    opQueue = run.catch(() => {});
+    return run;
+  };
 
   const runSelect = (sql, bindParams = []) => {
     const stmt = sqlDb.prepare(sql);
@@ -292,10 +307,13 @@ async function createSqlJsClient(dbPath) {
     return rows;
   };
 
-  const ensureSchemaAndSeed = () => {
+  const ensureSchemaAndSeed = (hasPersistedBuffer) => {
+    const hadEmployeesTable = Boolean(
+      runSelect("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'employees'")[0]
+    );
     sqlDb.exec(SQLITE_SCHEMA_SQL);
     const countRow = runSelect('SELECT COUNT(*) AS count FROM employees')[0];
-    if (Number(countRow?.count || 0) === 0) {
+    if ((!hasPersistedBuffer || !hadEmployeesTable) && Number(countRow?.count || 0) === 0) {
       console.log('🌱 Seeding initial employee records into sql.js SQLite...');
       for (const [name, dept, role, salary, joinDate] of INITIAL_SEEDS) {
         sqlDb.run(
@@ -310,11 +328,12 @@ async function createSqlJsClient(dbPath) {
   };
 
   const loadSqlDbFromBuffer = (bufferLike) => {
+    const hasBuffer = Boolean(bufferLike && bufferLike.byteLength > 0);
     if (sqlDb) {
       sqlDb.close();
     }
-    sqlDb = new SQL.Database(bufferLike ? new Uint8Array(bufferLike) : undefined);
-    return ensureSchemaAndSeed();
+    sqlDb = new SQL.Database(hasBuffer ? new Uint8Array(bufferLike) : undefined);
+    return ensureSchemaAndSeed(hasBuffer);
   };
 
   const exportAndWriteLocal = () => {
@@ -326,105 +345,113 @@ async function createSqlJsClient(dbPath) {
   const isMissingBlobsEnvError = (err) =>
     /MissingBlobsEnvironment/i.test(`${err?.name || ''} ${err?.message || ''}`);
 
-  const persist = async () => {
+  const persistLocked = async (blobStoreOverride = null) => {
     const arrayBuffer = exportAndWriteLocal();
-    if (blobSyncDisabled || !blobStore) return;
+    const blobStore = blobStoreOverride || (await resolveNetlifyBlobStore());
+    if (!blobStore) {
+      blobStatus = 'sqlite-local';
+      return;
+    }
 
     try {
       await blobStore.set(BLOB_KEY, arrayBuffer);
       const meta = await blobStore.getMetadata(BLOB_KEY, { consistency: 'strong' });
       currentBlobEtag = meta?.etag || null;
+      blobStatus = 'netlify-blobs-strong';
     } catch (err) {
       if (isMissingBlobsEnvError(err)) {
-        blobSyncDisabled = true;
+        blobStatus = 'sqlite-local';
         return;
       }
+      blobStatus = `blob-error:${err.message}`;
       console.warn('⚠️ Failed to persist SQLite state to Netlify Blobs:', err.message);
     }
   };
 
-  const performSync = async () => {
+  const performSyncLocked = async () => {
     if (!sqlDb) {
       const localBytes = fs.existsSync(dbPath) ? fs.readFileSync(dbPath) : undefined;
       loadSqlDbFromBuffer(localBytes);
     }
 
-    if (blobSyncDisabled || !blobStore) {
+    const blobStore = await resolveNetlifyBlobStore();
+    if (!blobStore) {
       exportAndWriteLocal();
+      blobStatus = 'sqlite-local';
       return;
     }
 
     try {
-      const meta = await blobStore.getMetadata(BLOB_KEY, { consistency: 'strong' });
-      if (!meta) {
-        await persist();
-        return;
-      }
-
-      if (meta.etag && meta.etag === currentBlobEtag) {
-        return;
-      }
-
       const entry = await blobStore.getWithMetadata(BLOB_KEY, {
         type: 'arrayBuffer',
         consistency: 'strong',
+        etag: currentBlobEtag || undefined,
       });
-      if (entry?.data) {
+
+      if (!entry) {
+        await persistLocked(blobStore);
+        return;
+      }
+
+      if (entry.data) {
         loadSqlDbFromBuffer(entry.data);
         exportAndWriteLocal();
-        currentBlobEtag = entry.etag || meta.etag || null;
+        currentBlobEtag = entry.etag || null;
       }
+      blobStatus = 'netlify-blobs-strong';
     } catch (err) {
       if (isMissingBlobsEnvError(err)) {
-        blobSyncDisabled = true;
+        blobStatus = 'sqlite-local';
         exportAndWriteLocal();
         return;
       }
+      blobStatus = `blob-error:${err.message}`;
       console.warn('⚠️ Failed to sync SQLite state from Netlify Blobs:', err.message);
     }
   };
 
-  const sync = () => {
-    const run = syncQueue.then(performSync, performSync);
-    syncQueue = run.catch(() => {});
-    return run;
-  };
+  const sync = () => enqueue(performSyncLocked);
 
   await sync();
 
   return {
     type: 'sqlite',
     sync,
+    getPersistenceMode: () => blobStatus,
     async query(text, params = []) {
-      const { sqliteSql, finalParams, isSelect, isInsert, isUpdate, wantsReturning } =
-        translatePostgresParams(text, params);
+      return enqueue(async () => {
+        const { sqliteSql, finalParams, isSelect, isInsert, isUpdate, wantsReturning } =
+          translatePostgresParams(text, params);
 
-      if (isSelect) {
-        const rows = runSelect(sqliteSql, finalParams);
-        return { rows: rows.map(normalizeRow), rowCount: rows.length };
-      }
+        if (isSelect) {
+          const rows = runSelect(sqliteSql, finalParams);
+          return { rows: rows.map(normalizeRow), rowCount: rows.length };
+        }
 
-      sqlDb.run(sqliteSql, finalParams);
-      const changes = sqlDb.getRowsModified();
+        sqlDb.run(sqliteSql, finalParams);
+        const changes = sqlDb.getRowsModified();
 
-      let rows = [];
-      if (isInsert && wantsReturning) {
-        const idRow = runSelect('SELECT last_insert_rowid() AS id')[0];
-        rows = runSelect('SELECT * FROM employees WHERE id = ?', [idRow.id]).map(normalizeRow);
-      } else if (isUpdate && wantsReturning && changes > 0) {
-        const id = params[params.length - 1];
-        rows = runSelect('SELECT * FROM employees WHERE id = ?', [id]).map(normalizeRow);
-      }
+        let rows = [];
+        if (isInsert && wantsReturning) {
+          const idRow = runSelect('SELECT last_insert_rowid() AS id')[0];
+          rows = runSelect('SELECT * FROM employees WHERE id = ?', [idRow.id]).map(normalizeRow);
+        } else if (isUpdate && wantsReturning && changes > 0) {
+          const id = params[params.length - 1];
+          rows = runSelect('SELECT * FROM employees WHERE id = ?', [id]).map(normalizeRow);
+        }
 
-      await persist();
-      return { rows, rowCount: changes };
+        await persistLocked();
+        return { rows, rowCount: changes };
+      });
     },
     async close() {
-      await persist();
-      if (sqlDb) {
-        sqlDb.close();
-        sqlDb = null;
-      }
+      await enqueue(async () => {
+        await persistLocked();
+        if (sqlDb) {
+          sqlDb.close();
+          sqlDb = null;
+        }
+      });
     },
   };
 }
@@ -527,9 +554,23 @@ export function getDatabaseType() {
   return dbType;
 }
 
+export function getPersistenceMode() {
+  if (typeof dbClient?.getPersistenceMode === 'function') {
+    return dbClient.getPersistenceMode();
+  }
+  if (dbType === 'postgres') {
+    return 'postgresql';
+  }
+  if (dbType === 'sqlite') {
+    return 'sqlite-local';
+  }
+  return 'unknown';
+}
+
 export default {
   initializeDatabase,
   syncDatabase,
   query,
   getDatabaseType,
+  getPersistenceMode,
 };

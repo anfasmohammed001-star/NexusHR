@@ -1,7 +1,12 @@
 import express from 'express';
 import cors from 'cors';
 import { env } from './config/env.js';
-import { initializeDatabase, syncDatabase, getDatabaseType } from './config/db.js';
+import {
+  initializeDatabase,
+  syncDatabase,
+  getDatabaseType,
+  getPersistenceMode,
+} from './config/db.js';
 import employeeRoutes from './routes/employeeRoutes.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 
@@ -68,6 +73,7 @@ app.get('/health', (req, res) => {
     status: 'healthy',
     timestamp: new Date().toISOString(),
     database: getDatabaseType(),
+    persistence: getPersistenceMode(),
     environment: env.NODE_ENV,
   });
 });
