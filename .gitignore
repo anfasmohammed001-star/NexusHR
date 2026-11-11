@@ -2,9 +2,10 @@
 node_modules/
 */node_modules/
 
-# Production Build
+# Production Build & Netlify Cache
 dist/
 */dist/
+.netlify/
 
 # Environment Variables
 .env.local

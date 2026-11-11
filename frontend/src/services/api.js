@@ -1,7 +1,9 @@
 import axios from 'axios';
 
-// Use environment variable or fallback to localhost:5000 / relative /api via Vite proxy
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+// Use VITE_API_URL when explicitly set; default to localhost:5000 in local dev and same-origin (/api/*) in production
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.DEV ? 'http://localhost:5000' : '');
 
 const client = axios.create({
   baseURL: API_BASE_URL,
@@ -24,7 +26,9 @@ function extractError(error) {
   }
   if (error.request) {
     return {
-      message: 'Cannot reach the backend server. Please verify the server is running on http://localhost:5000.',
+      message: API_BASE_URL
+        ? `Cannot reach the backend server at ${API_BASE_URL}. Please verify the server is running.`
+        : 'Cannot reach the backend API server. Please verify the service is online and retry.',
       errors: [{ field: 'network', message: 'Network connection failed.' }],
       status: 0,
     };

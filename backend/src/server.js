@@ -7,6 +7,21 @@ import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 
 const app = express();
 
+let initPromise = null;
+
+/**
+ * Ensure database connection, schema, and seed data are initialized once per runtime.
+ */
+export function ensureInitialized() {
+  if (!initPromise) {
+    initPromise = initializeDatabase().catch((err) => {
+      initPromise = null;
+      throw err;
+    });
+  }
+  return initPromise;
+}
+
 // Middleware
 app.use(cors({
   origin: '*', // Allow frontend development server & tools
@@ -16,6 +31,16 @@ app.use(cors({
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Ensure database readiness on serverless cold starts
+app.use(async (req, res, next) => {
+  try {
+    await ensureInitialized();
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
 
 // Request Logger (Development friendly)
 app.use((req, res, next) => {
@@ -50,7 +75,7 @@ app.use(errorHandler);
 async function startServer() {
   try {
     console.log('⏳ Bootstrapping database...');
-    await initializeDatabase();
+    await ensureInitialized();
 
     const PORT = env.PORT;
     const server = app.listen(PORT, () => {
@@ -77,7 +102,13 @@ async function startServer() {
   }
 }
 
-startServer();
+const isServerlessRuntime = Boolean(
+  process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.VERCEL
+);
+
+if (!isServerlessRuntime) {
+  startServer();
+}
 
 export default app;
 

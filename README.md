@@ -119,7 +119,12 @@ week 2 take 2 CRUD Employee Management System/
 ├── postman/
 │   └── employee_crud.postman_collection.json # Exportable Postman Collection v2.1
 ├── postman_collection.json             # Root copy for one-click Postman / Thunder Client import
+├── netlify/
+│   └── functions/
+│       └── api.mjs                     # Serverless Express handler for Netlify Functions
 ├── screenshots/                        # Verified live UI CRUD & validation screenshots
+├── .node-version                       # Pinned Node.js 22 runtime for CI & serverless builds
+├── netlify.toml                        # Netlify build, SPA fallback & /api/* proxy rules
 ├── package.json                        # Root workspace manager
 └── README.md                           # Documentation & Verification Guide
 ```
@@ -331,4 +336,16 @@ All four CRUD operations, search/sort filtering, validation states, and empty st
 - **Edit Modal Join Date Format**: Automatically converted to `YYYY-MM-DD` so HTML5 date pickers display the pre-filled date accurately.
 - **Graceful Offline Notice**: If the backend server stops, the frontend displays an alert banner with a one-click retry button rather than crashing.
 - **Automatic Fallback DB**: Prevents development blocking when PostgreSQL is not configured on the host machine.
+
+---
+
+## 🌐 Deploying on Netlify (Full-Stack)
+
+This repository includes [netlify.toml](netlify.toml) and [netlify/functions/api.mjs](netlify/functions/api.mjs) so Netlify deploys both the Vite frontend and Express API out of the box:
+
+- **Build command**: `npm run netlify:build`
+- **Publish directory**: `frontend/dist`
+- **Functions directory**: `netlify/functions` (proxies `/api/*` and `/health` via `[[redirects]]`, plus `/* -> /index.html` SPA rewrite)
+- **Database persistence**: Without external config, Netlify Functions seed an ephemeral `/tmp` SQLite database (`sql.js` / `node:sqlite`). For permanent cloud persistence across cold starts, add `DATABASE_URL` in **Netlify Site Configuration -> Environment variables** pointing to PostgreSQL (e.g. Supabase or Neon).
+
 

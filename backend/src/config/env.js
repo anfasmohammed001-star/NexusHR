@@ -2,11 +2,15 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const currentDir =
+  typeof import.meta?.url === 'string' && import.meta.url
+    ? path.dirname(fileURLToPath(import.meta.url))
+    : typeof __dirname === 'string'
+      ? __dirname
+      : process.cwd();
 
 // Load .env from backend directory
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+dotenv.config({ path: path.resolve(currentDir, '../../.env') });
 
 export const env = {
   PORT: process.env.PORT || 5000,

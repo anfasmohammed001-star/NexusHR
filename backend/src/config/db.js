@@ -1,15 +1,83 @@
 import pkg from 'pg';
 const { Pool } = pkg;
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { env } from './env.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const currentDir =
+  typeof import.meta?.url === 'string' && import.meta.url
+    ? path.dirname(fileURLToPath(import.meta.url))
+    : typeof __dirname === 'string'
+      ? __dirname
+      : process.cwd();
 
 let dbClient = null;
 let dbType = 'unknown';
+
+const PG_SCHEMA_FALLBACK_SQL = `
+CREATE TABLE IF NOT EXISTS employees (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(100) NOT NULL CHECK (char_length(trim(name)) > 0),
+  department VARCHAR(100) NOT NULL CHECK (char_length(trim(department)) > 0),
+  role VARCHAR(100) NOT NULL CHECK (char_length(trim(role)) > 0),
+  salary NUMERIC(12, 2) NOT NULL CHECK (salary > 0),
+  join_date DATE NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_employees_name ON employees (name);
+CREATE INDEX IF NOT EXISTS idx_employees_department ON employees (department);
+CREATE INDEX IF NOT EXISTS idx_employees_role ON employees (role);
+CREATE INDEX IF NOT EXISTS idx_employees_salary ON employees (salary);
+CREATE INDEX IF NOT EXISTS idx_employees_join_date ON employees (join_date);
+`;
+
+const SQLITE_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS employees (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    department TEXT NOT NULL,
+    role TEXT NOT NULL,
+    salary NUMERIC NOT NULL CHECK (salary > 0),
+    join_date TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_employees_name ON employees (name);
+  CREATE INDEX IF NOT EXISTS idx_employees_department ON employees (department);
+  CREATE INDEX IF NOT EXISTS idx_employees_role ON employees (role);
+  CREATE INDEX IF NOT EXISTS idx_employees_salary ON employees (salary);
+  CREATE INDEX IF NOT EXISTS idx_employees_join_date ON employees (join_date);
+`;
+
+/**
+ * Translate PostgreSQL positional parameters ($1, $2, ...) into SQLite `?` bindings.
+ */
+function translatePostgresParams(text, params = []) {
+  const mappedParams = [];
+  const sqliteSql = text
+    .replace(/\$(\d+)/g, (_, indexStr) => {
+      const idx = parseInt(indexStr, 10) - 1;
+      if (idx >= 0 && idx < params.length) {
+        mappedParams.push(params[idx]);
+      }
+      return '?';
+    })
+    .replace(/RETURNING\s+\*/gi, '')
+    .trim();
+
+  return {
+    sqliteSql,
+    finalParams: mappedParams.length > 0 ? mappedParams : params,
+    isSelect: /^\s*SELECT/i.test(sqliteSql),
+    isInsert: /^\s*INSERT/i.test(sqliteSql),
+    isUpdate: /^\s*UPDATE/i.test(sqliteSql),
+    wantsReturning: /RETURNING/i.test(text),
+  };
+}
 
 // Pre-packaged seed data for automatic fallback or bootstrapping
 const INITIAL_SEEDS = [
@@ -29,9 +97,19 @@ const INITIAL_SEEDS = [
  * Initialize PostgreSQL connection
  */
 async function initPostgres() {
+  const isLocalPg =
+    !env.DATABASE_URL ||
+    env.DATABASE_URL.includes('localhost') ||
+    env.DATABASE_URL.includes('127.0.0.1') ||
+    env.DATABASE_URL.includes('sslmode=disable');
+
   const pool = new Pool(
     env.DATABASE_URL
-      ? { connectionString: env.DATABASE_URL, connectionTimeoutMillis: 3000 }
+      ? {
+          connectionString: env.DATABASE_URL,
+          connectionTimeoutMillis: 3000,
+          ...(isLocalPg ? {} : { ssl: { rejectUnauthorized: false } }),
+        }
       : {
           host: env.PGHOST,
           port: env.PGPORT,
@@ -49,11 +127,11 @@ async function initPostgres() {
   console.log('✅ Connected to PostgreSQL database successfully.');
 
   // Create table & indexes if not present
-  const schemaPath = path.resolve(__dirname, '../../database/schema.sql');
-  if (fs.existsSync(schemaPath)) {
-    const schemaSql = fs.readFileSync(schemaPath, 'utf8');
-    await pool.query(schemaSql);
-  }
+  const schemaPath = path.resolve(currentDir, '../../database/schema.sql');
+  const schemaSql = fs.existsSync(schemaPath)
+    ? fs.readFileSync(schemaPath, 'utf8')
+    : PG_SCHEMA_FALLBACK_SQL;
+  await pool.query(schemaSql);
 
   // Check if seed needed
   const countRes = await pool.query('SELECT COUNT(*) AS count FROM employees');
@@ -88,43 +166,33 @@ async function initPostgres() {
 }
 
 /**
- * Initialize SQLite fallback using Node.js 24 native node:sqlite
+ * Resolve writable SQLite storage path across local and serverless runtimes.
  */
-async function initSqliteFallback() {
-  const { DatabaseSync } = await import('node:sqlite');
-  const dataDir = path.resolve(__dirname, '../../data');
+function resolveSqlitePath() {
+  const isServerless = Boolean(
+    process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.VERCEL
+  );
+  const dataDir = isServerless
+    ? path.join(os.tmpdir(), 'nexushr-data')
+    : path.resolve(currentDir, '../../data');
+
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
   }
+  return path.join(dataDir, 'employees.sqlite');
+}
 
-  const dbPath = path.join(dataDir, 'employees.sqlite');
+/**
+ * Build SQLite adapter using Node.js native node:sqlite.
+ */
+async function createNativeSqliteClient(dbPath) {
+  const { DatabaseSync } = await import('node:sqlite');
   const sqlite = new DatabaseSync(dbPath);
 
-  // Pragmas for performance & integrity
   sqlite.exec('PRAGMA journal_mode = WAL;');
   sqlite.exec('PRAGMA foreign_keys = ON;');
+  sqlite.exec(SQLITE_SCHEMA_SQL);
 
-  // Schema definition
-  sqlite.exec(`
-    CREATE TABLE IF NOT EXISTS employees (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      department TEXT NOT NULL,
-      role TEXT NOT NULL,
-      salary NUMERIC NOT NULL CHECK (salary > 0),
-      join_date TEXT NOT NULL,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_employees_name ON employees (name);
-    CREATE INDEX IF NOT EXISTS idx_employees_department ON employees (department);
-    CREATE INDEX IF NOT EXISTS idx_employees_role ON employees (role);
-    CREATE INDEX IF NOT EXISTS idx_employees_salary ON employees (salary);
-    CREATE INDEX IF NOT EXISTS idx_employees_join_date ON employees (join_date);
-  `);
-
-  // Check seed
   const countRow = sqlite.prepare('SELECT COUNT(*) AS count FROM employees').get();
   if (Number(countRow.count) === 0) {
     console.log('🌱 Seeding initial employee records into SQLite...');
@@ -137,45 +205,22 @@ async function initSqliteFallback() {
     console.log(`✅ Seeded ${INITIAL_SEEDS.length} records into SQLite.`);
   }
 
-  dbType = 'sqlite';
-  dbClient = {
+  return {
     type: 'sqlite',
     sqlite,
     async query(text, params = []) {
-      // Map positional parameters $1, $2, ... to SQLite params array
-      const mappedParams = [];
-      const sqliteSql = text
-        .replace(/\$(\d+)/g, (_, indexStr) => {
-          const idx = parseInt(indexStr, 10) - 1;
-          if (idx >= 0 && idx < params.length) {
-            mappedParams.push(params[idx]);
-          }
-          return '?';
-        })
-        .replace(/RETURNING\s+\*/gi, '') // SQLite compatibility
-        .trim();
-
-      const finalParams = mappedParams.length > 0 ? mappedParams : params;
-
-      const isSelect = /^\s*SELECT/i.test(sqliteSql);
-      const isInsert = /^\s*INSERT/i.test(sqliteSql);
-      const isUpdate = /^\s*UPDATE/i.test(sqliteSql);
-      const isDelete = /^\s*DELETE/i.test(sqliteSql);
-
+      const { sqliteSql, finalParams, isSelect, isInsert, isUpdate, wantsReturning } =
+        translatePostgresParams(text, params);
       const stmt = sqlite.prepare(sqliteSql);
 
       if (isSelect) {
         const rows = stmt.all(...finalParams);
-        return {
-          rows: rows.map(normalizeRow),
-          rowCount: rows.length,
-        };
+        return { rows: rows.map(normalizeRow), rowCount: rows.length };
       }
 
       const result = stmt.run(...finalParams);
 
-      // If INSERT with RETURNING was intended, fetch the created row
-      if (isInsert && /RETURNING/i.test(text)) {
+      if (isInsert && wantsReturning) {
         const lastRow = sqlite.prepare('SELECT * FROM employees WHERE id = ?').get(result.lastInsertRowid);
         return {
           rows: lastRow ? [normalizeRow(lastRow)] : [],
@@ -183,12 +228,10 @@ async function initSqliteFallback() {
         };
       }
 
-      // If UPDATE with RETURNING was intended
-      if (isUpdate && /RETURNING/i.test(text)) {
+      if (isUpdate && wantsReturning) {
         if (result.changes === 0) {
           return { rows: [], rowCount: 0 };
         }
-        // Last parameter in update is usually the id
         const id = params[params.length - 1];
         const updatedRow = sqlite.prepare('SELECT * FROM employees WHERE id = ?').get(id);
         return {
@@ -197,16 +240,105 @@ async function initSqliteFallback() {
         };
       }
 
-      return {
-        rows: [],
-        rowCount: result.changes,
-      };
+      return { rows: [], rowCount: result.changes };
     },
     async close() {
       sqlite.close();
     },
   };
+}
 
+/**
+ * Pure-JS SQLite fallback adapter (sql.js inline WASM) when node:sqlite is unavailable.
+ */
+async function createSqlJsClient(dbPath) {
+  const sqlJsMod = await import('sql.js/dist/sql-wasm-inline.js');
+  const initSqlJs = sqlJsMod.default || sqlJsMod;
+  const SQL = await initSqlJs();
+  const initialBuffer = fs.existsSync(dbPath) ? fs.readFileSync(dbPath) : undefined;
+  const sqlDb = new SQL.Database(initialBuffer);
+
+  const persist = () => {
+    fs.writeFileSync(dbPath, Buffer.from(sqlDb.export()));
+  };
+
+  const runSelect = (sql, bindParams = []) => {
+    const stmt = sqlDb.prepare(sql);
+    if (bindParams.length > 0) {
+      stmt.bind(bindParams);
+    }
+    const rows = [];
+    while (stmt.step()) {
+      rows.push(stmt.getAsObject());
+    }
+    stmt.free();
+    return rows;
+  };
+
+  sqlDb.exec(SQLITE_SCHEMA_SQL);
+  const countRow = runSelect('SELECT COUNT(*) AS count FROM employees')[0];
+  if (Number(countRow?.count || 0) === 0) {
+    console.log('🌱 Seeding initial employee records into sql.js SQLite...');
+    for (const [name, dept, role, salary, joinDate] of INITIAL_SEEDS) {
+      sqlDb.run(
+        'INSERT INTO employees (name, department, role, salary, join_date) VALUES (?, ?, ?, ?, ?)',
+        [name, dept, role, salary, joinDate]
+      );
+    }
+    console.log(`✅ Seeded ${INITIAL_SEEDS.length} records into sql.js SQLite.`);
+  }
+  persist();
+
+  return {
+    type: 'sqlite',
+    async query(text, params = []) {
+      const { sqliteSql, finalParams, isSelect, isInsert, isUpdate, wantsReturning } =
+        translatePostgresParams(text, params);
+
+      if (isSelect) {
+        const rows = runSelect(sqliteSql, finalParams);
+        return { rows: rows.map(normalizeRow), rowCount: rows.length };
+      }
+
+      sqlDb.run(sqliteSql, finalParams);
+      const changes = sqlDb.getRowsModified();
+
+      let rows = [];
+      if (isInsert && wantsReturning) {
+        const idRow = runSelect('SELECT last_insert_rowid() AS id')[0];
+        rows = runSelect('SELECT * FROM employees WHERE id = ?', [idRow.id]).map(normalizeRow);
+      } else if (isUpdate && wantsReturning && changes > 0) {
+        const id = params[params.length - 1];
+        rows = runSelect('SELECT * FROM employees WHERE id = ?', [id]).map(normalizeRow);
+      }
+
+      persist();
+      return { rows, rowCount: changes };
+    },
+    async close() {
+      persist();
+      sqlDb.close();
+    },
+  };
+}
+
+/**
+ * Initialize SQLite fallback (node:sqlite on Node 22.13+/24+, or pure-JS sql.js fallback)
+ */
+async function initSqliteFallback() {
+  const dbPath = resolveSqlitePath();
+
+  try {
+    if (process.env.FORCE_SQLJS === '1') {
+      throw new Error('Forced sql.js fallback mode');
+    }
+    dbClient = await createNativeSqliteClient(dbPath);
+  } catch (nativeErr) {
+    console.warn('⚠️ Native node:sqlite unavailable, using sql.js fallback:', nativeErr.message);
+    dbClient = await createSqlJsClient(dbPath);
+  }
+
+  dbType = 'sqlite';
   console.log(`⚡ Using persistent SQLite database at: ${dbPath}`);
   return dbClient;
 }
